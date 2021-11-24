@@ -16,17 +16,24 @@ limitations under the License.
 
 syntax = "proto2";
 
+option go_package = "./;groupcachepb";
 package groupcachepb;
 
 message GetRequest {
   required string group = 1;
   required string key = 2; // not actually required/guaranteed to be UTF-8
+  optional string peer_key = 3; // use to pick peer,if null, use key to pick peer
+  optional bool multi = 4; // is multi key request
 }
 
 message GetResponse {
   optional bytes value = 1;
   optional double minute_qps = 2;
   optional int64 expire = 3;
+}
+
+message GetMultiResponse {
+    repeated GetResponse value_list = 1;
 }
 
 service GroupCache {
