@@ -28,8 +28,8 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/mailgun/groupcache/v2/consistenthash"
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
+	"github.com/zhangkyou/groupcache/consistenthash"
+	pb "github.com/zhangkyou/groupcache/groupcachepb"
 )
 
 const defaultBasePath = "/_groupcache/"
@@ -208,7 +208,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		bValues := make([][]byte, len(keys))
 		dests := make([]Sink, len(keys))
-		for i := 0; i< len(keys); i++ {
+		for i := 0; i < len(keys); i++ {
 			dests[i] = AllocatingByteSliceSink(&bValues[i])
 		}
 		err := group.BatchGet(ctx, peerKey, keys, dests)

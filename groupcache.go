@@ -33,10 +33,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
-	"github.com/mailgun/groupcache/v2/lru"
-	"github.com/mailgun/groupcache/v2/singleflight"
 	"github.com/sirupsen/logrus"
+	pb "github.com/zhangkyou/groupcache/groupcachepb"
+	"github.com/zhangkyou/groupcache/lru"
+	"github.com/zhangkyou/groupcache/singleflight"
 )
 
 var logger *logrus.Entry
@@ -78,7 +78,6 @@ func (f GetterFunc) Get(ctx context.Context, key string, dest Sink) error {
 //func (f GetterFunc) BatchGet(ctx context.Context, keys []string, dests []Sink) []error {
 //	return nil
 //}
-
 
 // A BatchGetterFunc implements two get functions.Get and BatchGet
 type BatchGetterFunc func(ctx context.Context, keys []string, dests []Sink) error
@@ -221,13 +220,13 @@ func callInitPeerServer() {
 // A Group is a cache namespace and associated data loaded spread over
 // a group of 1 or more machines.
 type Group struct {
-	name       string
-	getter     Getter
+	name   string
+	getter Getter
 	// A batch getter can get a series key's value
 	batchGetter BatchGetter
-	peersOnce  sync.Once
-	peers      PeerPicker
-	cacheBytes int64 // limit for sum of mainCache and hotCache size
+	peersOnce   sync.Once
+	peers       PeerPicker
+	cacheBytes  int64 // limit for sum of mainCache and hotCache size
 
 	// mainCache is a cache of the keys for which this process
 	// (amongst its peers) is authoritative. That is, this cache
@@ -291,6 +290,10 @@ func (g *Group) initPeers() {
 	if g.peers == nil {
 		g.peers = getPeers(g.name)
 	}
+}
+
+func (g *Group) GetPeers() PeerPicker {
+	return g.peers
 }
 
 func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
@@ -623,10 +626,10 @@ func (g *Group) getBatchFromPeer(ctx context.Context, peer ProtoGetter, peerKey 
 	keyListParam := strings.Join(keys, ",")
 	multi := true
 	req := &pb.GetRequest{
-		Group: &g.name,
-		Key:   &keyListParam,
+		Group:   &g.name,
+		Key:     &keyListParam,
 		PeerKey: &peerKey,
-		Multi: &multi,
+		Multi:   &multi,
 	}
 	multiRes := &pb.GetMultiResponse{}
 	err := peer.BatchGet(ctx, req, multiRes)

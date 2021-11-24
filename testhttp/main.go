@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"github.com/mailgun/groupcache/v2"
+	"github.com/zhangkyou/groupcache"
 	"log"
 	"net/http"
 	"strings"
@@ -13,7 +13,7 @@ import (
 
 const (
 	Protocol = "http://"
-	BaseUrl = "127.0.0.1"
+	BaseUrl  = "127.0.0.1"
 )
 
 func main() {
@@ -41,7 +41,7 @@ func main() {
 
 	batchGetter := func(_ context.Context, keys []string, dests []groupcache.Sink) error {
 		for i := 0; i < len(keys); i++ {
-			err := dests[i].SetString("got:" + keys[i], time.Time{})
+			err := dests[i].SetString("got:"+keys[i], time.Time{})
 			if err != nil {
 				return err
 			}
@@ -81,7 +81,7 @@ func main() {
 			writer.Write([]byte("\n"))
 			return
 		}
-		writer.Header().Set("Content-Type","application/json")
+		writer.Header().Set("Content-Type", "application/json")
 		writer.Write(bodyStr)
 		writer.Write([]byte("\n"))
 		return
@@ -98,7 +98,7 @@ func main() {
 			writer.Write([]byte("\n"))
 			return
 		}
-		writer.Header().Set("Content-Type","application/json")
+		writer.Header().Set("Content-Type", "application/json")
 		writer.Write(body)
 		writer.Write([]byte("\n"))
 	})
@@ -113,7 +113,37 @@ func main() {
 			writer.Write([]byte("\n"))
 			return
 		}
-		writer.Header().Set("Content-Type","application/json")
+		writer.Header().Set("Content-Type", "application/json")
+		writer.Write(body)
+		writer.Write([]byte("\n"))
+	})
+
+	http.HandleFunc("/groupPeers", func(writer http.ResponseWriter, request *http.Request) {
+		result := batchGroup.GetPeers()
+		log.Printf("peers: %+v", result)
+	})
+
+	http.HandleFunc("/changePeers", func(writer http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query()
+		peers := query.Get("peers")
+
+		peerList := strings.Split(peers, ",")
+		log.Printf("peer list: %+v", peerList)
+		pool.Set(peerList...)
+		log.Printf("pool http gtter: %+v", pool.GetAll())
+
+		//batchGroup.ResetPeers()
+		result := batchGroup.GetPeers()
+		log.Printf("group peers: %+v", result)
+
+		body, err := json.Marshal(result)
+		if err != nil {
+			writer.Write([]byte(err.Error()))
+			writer.Write([]byte("\n"))
+			return
+		}
+
+		writer.Header().Set("Content-Type", "application/json")
 		writer.Write(body)
 		writer.Write([]byte("\n"))
 	})

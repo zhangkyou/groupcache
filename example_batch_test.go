@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mailgun/groupcache/v2"
+	"github.com/zhangkyou/groupcache"
 )
 
 func ExampleBatchUsage() {
@@ -36,7 +36,7 @@ func ExampleBatchUsage() {
 	batchGetter := func(_ context.Context, keys []string, dests []groupcache.Sink) error {
 		localHits++
 		for i := 0; i < len(keys); i++ {
-			err := dests[i].SetString("got:" + keys[i], time.Time{})
+			err := dests[i].SetString("got:"+keys[i], time.Time{})
 			if err != nil {
 				return err
 			}

@@ -33,8 +33,8 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
-	"github.com/mailgun/groupcache/v2/testpb"
+	pb "github.com/zhangkyou/groupcache/groupcachepb"
+	"github.com/zhangkyou/groupcache/testpb"
 )
 
 var (
@@ -452,7 +452,7 @@ func TestPeersByBatchGet(t *testing.T) {
 	batchGetter := func(_ context.Context, keys []string, dests []Sink) error {
 		localHits++
 		for i := 0; i < len(keys); i++ {
-			err := dests[i].SetString("got:" + keys[i], time.Time{})
+			err := dests[i].SetString("got:"+keys[i], time.Time{})
 			if err != nil {
 				return err
 			}
@@ -551,7 +551,7 @@ func TestHTTPPoolBatchGet(t *testing.T) {
 	batchGetter := func(_ context.Context, keys []string, dests []Sink) error {
 		localHits++
 		for i := 0; i < len(keys); i++ {
-			err := dests[i].SetString("got:" + keys[i], time.Time{})
+			err := dests[i].SetString("got:"+keys[i], time.Time{})
 			if err != nil {
 				return err
 			}
