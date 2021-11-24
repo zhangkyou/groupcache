@@ -28,14 +28,15 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
-	"github.com/mailgun/groupcache/v2/lru"
-	"github.com/mailgun/groupcache/v2/singleflight"
 	"github.com/sirupsen/logrus"
+	pb "github.com/zhangkyou/groupcache/groupcachepb"
+	"github.com/zhangkyou/groupcache/lru"
+	"github.com/zhangkyou/groupcache/singleflight"
 )
 
 var logger *logrus.Entry
@@ -55,11 +56,44 @@ type Getter interface {
 	Get(ctx context.Context, key string, dest Sink) error
 }
 
+// A BatchGetter loads data by a series keys
+type BatchGetter interface {
+	//batch get by key list
+	Get(ctx context.Context, keys []string, dests []Sink) error
+}
+
+//type GroupGetter interface {
+//	Getter
+//	BatchGetter
+//}
+
 // A GetterFunc implements Getter with a function.
 type GetterFunc func(ctx context.Context, key string, dest Sink) error
 
 func (f GetterFunc) Get(ctx context.Context, key string, dest Sink) error {
 	return f(ctx, key, dest)
+}
+
+// placeholder function
+//func (f GetterFunc) BatchGet(ctx context.Context, keys []string, dests []Sink) []error {
+//	return nil
+//}
+
+// A BatchGetterFunc implements two get functions.Get and BatchGet
+type BatchGetterFunc func(ctx context.Context, keys []string, dests []Sink) error
+
+//func (f BatchGetterFunc) Get(ctx context.Context, key string, dest Sink) error {
+//	keys := []string{key}
+//	dests := []Sink{dest}
+//	errs := f.BatchGet(ctx, keys, dests)
+//	if len(errs) == 0 {
+//		return nil
+//	}
+//	return errs[0]
+//}
+
+func (f BatchGetterFunc) Get(ctx context.Context, keys []string, dests []Sink) error {
+	return f(ctx, keys, dests)
 }
 
 var (
@@ -92,6 +126,10 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 	return newGroup(name, cacheBytes, getter, nil)
 }
 
+func NewBatchGroup(name string, cacheBytes int64, getter Getter, batchGetter BatchGetter) *Group {
+	return newBatchGroup(name, cacheBytes, getter, batchGetter, nil)
+}
+
 // DeregisterGroup removes group from group pool
 func DeregisterGroup(name string) {
 	mu.Lock()
@@ -113,6 +151,33 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 	g := &Group{
 		name:        name,
 		getter:      getter,
+		peers:       peers,
+		cacheBytes:  cacheBytes,
+		loadGroup:   &singleflight.Group{},
+		removeGroup: &singleflight.Group{},
+	}
+	if fn := newGroupHook; fn != nil {
+		fn(g)
+	}
+	groups[name] = g
+	return g
+}
+
+func newBatchGroup(name string, cacheBytes int64, getter Getter, batchGetter BatchGetter, peers PeerPicker) *Group {
+	if batchGetter == nil && getter == nil {
+		panic("nil BatchGetter and Getter")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	initPeerServerOnce.Do(callInitPeerServer)
+	if _, dup := groups[name]; dup {
+		panic("duplicate registration of group " + name)
+	}
+	g := &Group{
+		name:        name,
+		getter:      getter,
+		batchGetter: batchGetter,
 		peers:       peers,
 		cacheBytes:  cacheBytes,
 		loadGroup:   &singleflight.Group{},
@@ -155,11 +220,13 @@ func callInitPeerServer() {
 // A Group is a cache namespace and associated data loaded spread over
 // a group of 1 or more machines.
 type Group struct {
-	name       string
-	getter     Getter
-	peersOnce  sync.Once
-	peers      PeerPicker
-	cacheBytes int64 // limit for sum of mainCache and hotCache size
+	name   string
+	getter Getter
+	// A batch getter can get a series key's value
+	batchGetter BatchGetter
+	peersOnce   sync.Once
+	peers       PeerPicker
+	cacheBytes  int64 // limit for sum of mainCache and hotCache size
 
 	// mainCache is a cache of the keys for which this process
 	// (amongst its peers) is authoritative. That is, this cache
@@ -225,6 +292,10 @@ func (g *Group) initPeers() {
 	}
 }
 
+func (g *Group) GetPeers() PeerPicker {
+	return g.peers
+}
+
 func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
 	g.peersOnce.Do(g.initPeers)
 	g.Stats.Gets.Add(1)
@@ -251,6 +322,53 @@ func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
 		return nil
 	}
 	return setSinkView(dest, value)
+}
+
+func (g *Group) BatchGet(ctx context.Context, peerKey string, keys []string, dests []Sink) error {
+	g.peersOnce.Do(g.initPeers)
+	if len(dests) == 0 {
+		return errors.New("groupcache: empty dests Sink")
+	}
+
+	// keys count match equal the result dest's count
+	if len(dests) != len(keys) {
+		return errors.New("groupcache: keys number and dests number dont match")
+	}
+
+	//fmt.Printf("BatchGet info; peerKey: %s, keys: %+v\n", peerKey, keys)
+	totalCount := len(keys)
+	g.Stats.Gets.Add(int64(totalCount))
+	//hit cache keys in values,miss cache keys in missKeys
+	values, missKeys := g.lookupCacheBatch(keys)
+	if values == nil {
+		//if group.cacheBytes is zero,this values will be nil
+		values = make(map[string]ByteView, 0)
+	}
+	//fmt.Printf("BatchGet info; peerKey: %s, cache values: %+v, missKeys: %v\n", peerKey, values, missKeys)
+
+	if len(missKeys) == 0 {
+		g.Stats.CacheHits.Add(int64(totalCount))
+		//fmt.Printf("BatchGet total cache hit; peerKey: %s, keys: %v\n", peerKey, keys)
+		return setBatchSinkView(keys, dests, values)
+	}
+
+	g.Stats.CacheHits.Add(int64(totalCount - len(missKeys)))
+	//fmt.Printf("BatchGet misskeys: %v, cacheHits: %d\n", missKeys, g.Stats.CacheHits)
+
+	missValues := make([]string, len(missKeys))
+	missDests := BatchStringSink(missValues)
+	loadValues, err := g.batchLoad(ctx, peerKey, missKeys, missDests)
+	if err != nil {
+		return err
+	}
+
+	//merge miss keys values(loadValues) and hit cache keys values(values)
+	for _, key := range keys {
+		if _, exist := values[key]; !exist {
+			values[key] = loadValues[key]
+		}
+	}
+	return setBatchSinkView(keys, dests, values)
 }
 
 // Remove clears the key from our cache then forwards the remove
@@ -391,12 +509,91 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 	return
 }
 
+func (g *Group) batchLoad(ctx context.Context, peerKey string, keys []string, dests []Sink) (values map[string]ByteView, err error) {
+	g.Stats.Loads.Add(1)
+	//todo 这里多key的并发请求处理没想好,暂时先不用加锁的机制了,直接处理逻辑
+	//lockKey := peerKey + strings.Join(keys, ",")
+	//viewi, err := g.loadGroup.Do(lockKey, func() (interface{}, error) {
+	//})
+
+	values = make(map[string]ByteView)
+	if peer, ok := g.peers.PickPeer(peerKey); ok {
+		// metrics duration start
+		start := time.Now()
+
+		var peerValues []ByteView
+		// get value from peers
+		peerValues, err = g.getBatchFromPeer(ctx, peer, peerKey, keys)
+
+		// metrics duration compute
+		duration := int64(time.Since(start)) / int64(time.Millisecond)
+
+		// metrics only store the slowest duration
+		if g.Stats.GetFromPeersLatencyLower.Get() < duration {
+			g.Stats.GetFromPeersLatencyLower.Store(duration)
+		}
+
+		if err == nil {
+			g.Stats.PeerLoads.Add(int64(len(keys)))
+			for idx, key := range keys {
+				values[key] = peerValues[idx]
+			}
+			return values, nil
+		}
+
+		if logger != nil {
+			logger.WithFields(logrus.Fields{
+				"err":      err,
+				"key":      strings.Join(keys, ","),
+				"category": "groupcache",
+			}).Errorf("error retrieving key from peer '%s'", peer.GetURL())
+		}
+
+		g.Stats.PeerErrors.Add(1)
+		if ctx != nil && ctx.Err() != nil {
+			// Return here without attempting to get locally
+			// since the context is no longer valid
+			return nil, err
+		}
+	}
+
+	//peer = self or get from peer error
+	localValues, err := g.getBatchLocally(ctx, keys, dests)
+	if err != nil {
+		g.Stats.LocalLoadErrs.Add(1)
+		return
+	}
+	g.Stats.LocalLoads.Add(int64(len(keys)))
+	for idx, key := range keys {
+		values[key] = localValues[idx]
+		g.populateCache(key, localValues[idx], &g.mainCache)
+	}
+	return
+}
+
 func (g *Group) getLocally(ctx context.Context, key string, dest Sink) (ByteView, error) {
 	err := g.getter.Get(ctx, key, dest)
 	if err != nil {
 		return ByteView{}, err
 	}
 	return dest.view()
+}
+
+func (g *Group) getBatchLocally(ctx context.Context, keys []string, dests []Sink) ([]ByteView, error) {
+	err := g.batchGetter.Get(ctx, keys, dests)
+	if err != nil {
+		return []ByteView{}, err
+	}
+
+	result := make([]ByteView, len(keys))
+	for idx, dest := range dests {
+		view, err := dest.view()
+		if err != nil {
+			return []ByteView{}, err
+		}
+		result[idx] = view
+	}
+	return result, nil
 }
 
 func (g *Group) getFromPeer(ctx context.Context, peer ProtoGetter, key string) (ByteView, error) {
@@ -425,6 +622,45 @@ func (g *Group) getFromPeer(ctx context.Context, peer ProtoGetter, key string) (
 	return value, nil
 }
 
+func (g *Group) getBatchFromPeer(ctx context.Context, peer ProtoGetter, peerKey string, keys []string) ([]ByteView, error) {
+	keyListParam := strings.Join(keys, ",")
+	multi := true
+	req := &pb.GetRequest{
+		Group:   &g.name,
+		Key:     &keyListParam,
+		PeerKey: &peerKey,
+		Multi:   &multi,
+	}
+	multiRes := &pb.GetMultiResponse{}
+	err := peer.BatchGet(ctx, req, multiRes)
+	if err != nil {
+		return []ByteView{}, err
+	}
+
+	values := make([]ByteView, 0, len(keys))
+	for i, res := range multiRes.ValueList {
+		var expire time.Time
+		if res == nil {
+			return nil, errors.New("invalid return value")
+		}
+		if res.Expire != nil && *res.Expire != 0 {
+			expire = time.Unix(*res.Expire/int64(time.Second), *res.Expire%int64(time.Second))
+			if time.Now().After(expire) {
+				values = append(values, ByteView{})
+				//return ByteView{}, errors.New("peer returned expired value")
+				continue
+			}
+		}
+
+		value := ByteView{b: res.Value, e: expire}
+		values = append(values, value)
+		// Always populate the hot cache
+		g.populateCache(keys[i], value, &g.hotCache)
+	}
+
+	return values, nil
+}
+
 func (g *Group) removeFromPeer(ctx context.Context, peer ProtoGetter, key string) error {
 	req := &pb.GetRequest{
 		Group: &g.name,
@@ -442,6 +678,32 @@ func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
 		return
 	}
 	value, ok = g.hotCache.get(key)
+	return
+}
+
+// look up main cache and hot cache by batch keys
+func (g *Group) lookupCacheBatch(keys []string) (values map[string]ByteView, missKeys []string) {
+	if g.cacheBytes <= 0 {
+		missKeys = keys
+		return
+	}
+
+	values = make(map[string]ByteView, 0)
+	missKeys = make([]string, 0)
+	for _, key := range keys {
+		value, ok := g.mainCache.get(key)
+		if ok {
+			values[key] = value
+			continue
+		}
+		value, ok = g.hotCache.get(key)
+		if ok {
+			values[key] = value
+			continue
+		}
+		missKeys = append(missKeys, key)
+	}
+
 	return
 }
 

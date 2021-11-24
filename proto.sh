@@ -6,11 +6,12 @@ set -u
 set -x
 
 PROTO_DIR=groupcachepb
+PROTO_CMD=/Users/zhangkun/study/protobuf/protoc/bin/protoc
 
-protoc -I=$PROTO_DIR \
+$PROTO_CMD -I=$PROTO_DIR \
     --go_out=$PROTO_DIR \
     $PROTO_DIR/groupcache.proto
 
-protoc -I=$PROTO_DIR \
+$PROTO_CMD -I=$PROTO_DIR \
    --go_out=. \
     $PROTO_DIR/example.proto

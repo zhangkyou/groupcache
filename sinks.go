@@ -18,6 +18,7 @@ package groupcache
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -70,6 +71,27 @@ func setSinkView(s Sink, v ByteView) error {
 		return s.SetBytes(v.b, v.Expire())
 	}
 	return s.SetString(v.s, v.Expire())
+}
+
+func setBatchSinkView(keys []string, dests []Sink, values map[string]ByteView) error {
+	for index, key := range keys {
+		if value, exist := values[key]; exist {
+			err := setSinkView(dests[index], value)
+			if err != nil {
+				return errors.New(fmt.Sprintf("key: %s,err: %s", key, err))
+			}
+		}
+	}
+	return nil
+}
+
+// BatchStringSink returns a sink list populates the provided string list pointer
+func BatchStringSink(s []string) []Sink {
+	dests := make([]Sink, len(s))
+	for i := 0; i < len(s); i++ {
+		dests[i] = StringSink(&s[i])
+	}
+	return dests
 }
 
 // StringSink returns a Sink that populates the provided string pointer.
