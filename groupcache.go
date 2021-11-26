@@ -272,9 +272,11 @@ type Stats struct {
 	Gets                     AtomicInt // any Get request, including from peers
 	CacheHits                AtomicInt // either cache was good
 	GetFromPeersLatencyLower AtomicInt // slowest duration to request value from peers
+	GetFromPeersLatencyLast  AtomicInt // last duration to request value from peers
 	PeerLoads                AtomicInt // either remote load or remote cache hit (not an error)
 	PeerErrors               AtomicInt
 	Loads                    AtomicInt // (gets - cacheHits)
+	LoadsKeys                AtomicInt // batch get keys number
 	LoadsDeduped             AtomicInt // after singleflight
 	LocalLoads               AtomicInt // total good local loads
 	LocalLoadErrs            AtomicInt // total bad local loads
@@ -335,7 +337,6 @@ func (g *Group) BatchGet(ctx context.Context, peerKey string, keys []string, des
 		return errors.New("groupcache: keys number and dests number dont match")
 	}
 
-	//fmt.Printf("BatchGet info; peerKey: %s, keys: %+v\n", peerKey, keys)
 	totalCount := len(keys)
 	g.Stats.Gets.Add(int64(totalCount))
 	//hit cache keys in values,miss cache keys in missKeys
@@ -344,16 +345,13 @@ func (g *Group) BatchGet(ctx context.Context, peerKey string, keys []string, des
 		//if group.cacheBytes is zero,this values will be nil
 		values = make(map[string]ByteView, 0)
 	}
-	//fmt.Printf("BatchGet info; peerKey: %s, cache values: %+v, missKeys: %v\n", peerKey, values, missKeys)
 
 	if len(missKeys) == 0 {
 		g.Stats.CacheHits.Add(int64(totalCount))
-		//fmt.Printf("BatchGet total cache hit; peerKey: %s, keys: %v\n", peerKey, keys)
 		return setBatchSinkView(keys, dests, values)
 	}
 
 	g.Stats.CacheHits.Add(int64(totalCount - len(missKeys)))
-	//fmt.Printf("BatchGet misskeys: %v, cacheHits: %d\n", missKeys, g.Stats.CacheHits)
 
 	missValues := make([]string, len(missKeys))
 	missDests := BatchStringSink(missValues)
@@ -467,6 +465,7 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 			if g.Stats.GetFromPeersLatencyLower.Get() < duration {
 				g.Stats.GetFromPeersLatencyLower.Store(duration)
 			}
+			g.Stats.GetFromPeersLatencyLast.Store(duration)
 
 			if err == nil {
 				g.Stats.PeerLoads.Add(1)
@@ -511,6 +510,7 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 
 func (g *Group) batchLoad(ctx context.Context, peerKey string, keys []string, dests []Sink) (values map[string]ByteView, err error) {
 	g.Stats.Loads.Add(1)
+	g.Stats.LoadsKeys.Add(int64(len(keys)))
 	//todo 这里多key的并发请求处理没想好,暂时先不用加锁的机制了,直接处理逻辑
 	//lockKey := peerKey + strings.Join(keys, ",")
 	//viewi, err := g.loadGroup.Do(lockKey, func() (interface{}, error) {
@@ -532,6 +532,7 @@ func (g *Group) batchLoad(ctx context.Context, peerKey string, keys []string, de
 		if g.Stats.GetFromPeersLatencyLower.Get() < duration {
 			g.Stats.GetFromPeersLatencyLower.Store(duration)
 		}
+		g.Stats.GetFromPeersLatencyLast.Store(duration)
 
 		if err == nil {
 			g.Stats.PeerLoads.Add(int64(len(keys)))
